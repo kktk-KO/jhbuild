@@ -97,12 +97,18 @@ class ParallelBuildScript(BuildScript):
 
     @contextmanager
     def handle_signal(self):
-        prev_handler = signal.getsignal(signal.SIGINT)
+        signals = [signal.SIGINT, signal.SIGTERM]
+        prev_handlers = {
+            s: signal.getsignal(s)
+            for s in signals
+        }
         def handler(signum, stack):
             self.cancel['value'] = True
-        signal.signal(signal.SIGINT, handler)
+        for s in signals:
+            signal.signal(s, handler)
         yield
-        signal.signal(signal.SIGINT, prev_handler)
+        for s in signals:
+            signal.signal(s, prev_handlers[s])
 
     def build_one(self, phases, module):
         worker = None
