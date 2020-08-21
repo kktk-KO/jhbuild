@@ -40,7 +40,6 @@ class ParallelBuildScript(BuildScript):
             }
             for module in self.module_list
         }
-
         self.cancel = {'value': False}
 
         for module in self.module_list:
@@ -53,13 +52,14 @@ class ParallelBuildScript(BuildScript):
                 return wrapper
             self.modules[module.name]['logger'] = Logger(module.name)
 
-        self.worker_queue = Queue(range(1)) # TODO
+        self.num_worker = int(self.config.cmdline_options.num_worker)
+        self.worker_queue = Queue(range(self.num_worker))
 
         self.check_cancel_interval = 1.0
         self.print_status_interval = 10.0
 
     def build(self, phases=None):
-        logging.info('creating workers')
+        logging.info('creating %d workers' % self.num_worker)
         for module in self.module_list:
             self.modules[module.name]['worker'] = Thread(target=self.build_one, args=[phases, self.modules[module.name]])
         logging.info('start workers')
