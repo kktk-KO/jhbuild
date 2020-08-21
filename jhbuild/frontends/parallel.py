@@ -4,12 +4,14 @@ import subprocess
 import sys
 import select
 import signal
+import traceback
 
 from threading import Thread
 from threading import Event
 from threading import Lock
 from threading import Condition
 from datetime import datetime
+from time import time
 from time import sleep
 from contextlib import contextmanager
 
@@ -30,6 +32,7 @@ class ParallelBuildScript(BuildScript):
                 'dependencies': None,
                 'worker': None,
                 'success': False,
+                'fail': False,
                 'skipped': False,
                 'finished': Event(),
                 'log': '',
@@ -52,6 +55,9 @@ class ParallelBuildScript(BuildScript):
 
         self.worker_queue = Queue(range(1)) # TODO
 
+        self.check_cancel_interval = 1.0
+        self.print_status_interval = 10.0
+
     def build(self, phases=None):
         logging.info('creating workers')
         for module in self.module_list:
@@ -59,7 +65,7 @@ class ParallelBuildScript(BuildScript):
         logging.info('start workers')
 
         cancel_detected = False
-
+        last_status_time = 0
         with self.handle_signal():
             for module in self.module_list:
                 self.modules[module.name]['worker'].start()
@@ -67,19 +73,27 @@ class ParallelBuildScript(BuildScript):
                 if self.cancel['value'] and (not cancel_detected):
                     logging.info('cancel is reqested.')
                     cancel_detected = True
-                sleep(1)
+                if time() - last_status_time > self.print_status_interval:
+                    last_status_time = time()
+                    total, success, skipped, fail, unfinished = self.get_build_status()
+                    logging.info('total = %d, success = %d, skipped = %d, fail = %d, unfinished = %d', total, success, skipped, fail, unfinished)
+                sleep(self.check_cancel_interval)
             for module in self.module_list:
                 self.modules[module.name]['worker'].join()
-
-        total = len(self.modules)
-        success = sum(map(lambda x: int(x['success'] == True), self.modules.values()))
-        skipped = sum(map(lambda x: int(x['skipped'] == True), self.modules.values()))
-        fail = total - success - skipped
-        logging.info('total = %d, success = %d, skipped = %d, fail = %d', total, success, skipped, fail)
+        total, success, skipped, fail, unfinished = self.get_build_status()
+        logging.info('total = %d, success = %d, skipped = %d, fail = %d, unfinished = %d', total, success, skipped, fail, unfinished)
         return total == success + skipped
 
     def check_build_finish(self):
         return all([not module['worker'].is_alive() for module in self.modules.values()])
+
+    def get_build_status(self):
+        total = len(self.modules)
+        success = sum(map(lambda x: int(x['success'] == True), self.modules.values()))
+        skipped = sum(map(lambda x: int(x['skipped'] == True), self.modules.values()))
+        fail = sum(map(lambda x: int(x['fail'] == True), self.modules.values()))
+        unfinished = total - (success + skipped + fail)
+        return total, success, skipped, fail, unfinished
 
     @contextmanager
     def handle_signal(self):
@@ -101,11 +115,13 @@ class ParallelBuildScript(BuildScript):
             worker = self.worker_queue.pop()
             if self.cancel['value']:
                 module['success'] = False
+                module['fail'] = False
                 module['skipped'] = True
                 return
 
             if self.check_skip(module):
                 module['success'] = False
+                module['fail'] = False
                 module['skipped'] = True
                 return
 
@@ -127,11 +143,13 @@ class ParallelBuildScript(BuildScript):
                 if error:
                     raise Exception(error)
             module['success'] = True
+            module['fail'] = False
             module['skipped'] = False
         except Exception as e:
-            logging.exception(e)
-            logger('error = %s' % str(e))
+            for line in traceback.format_exc().split('\n'):
+                logger(line)
             module['success'] = False
+            module['fail'] = True
             module['skipped'] = False
             self.cancel['value'] = True
         finally:
@@ -163,7 +181,7 @@ class ParallelBuildScriptProxy(BuildScript):
         self.modules[module.name]['logger']('set_action: action = %s' % action)
 
     def execute(self, command, hint=None, cwd=None, extra_env=None):
-        log = self.module['logger']
+        logger = self.module['logger']
         if not command:
             raise CommandError(_('No command given'))
 
@@ -201,7 +219,7 @@ class ParallelBuildScriptProxy(BuildScript):
         if not self.config.quiet_mode:
             if self.config.print_command_pattern:
                 try:
-                    log(self.config.print_command_pattern % print_args)
+                    logger(self.config.print_command_pattern % print_args)
                 except TypeError as e:
                     raise FatalError('\'print_command_pattern\' %s' % e)
                 except KeyError as e:
@@ -231,7 +249,7 @@ class ParallelBuildScriptProxy(BuildScript):
         return self.process_popen(p)
 
     def process_popen(self, popen):
-        log = self.module['logger']
+        logger = self.module['logger']
         read_set = []
         if popen.stdout:
             read_set.append(popen.stdout)
@@ -240,7 +258,7 @@ class ParallelBuildScriptProxy(BuildScript):
         try:
             while read_set:
                 if self.cancel['value']:
-                    log('got cancel request.')
+                    logger('got cancel request.')
                     os.kill(popen.pid, signal.SIGINT)
                     break
                 rlist, wlist, xlist = select.select(read_set, [], [])
@@ -261,8 +279,8 @@ class ParallelBuildScriptProxy(BuildScript):
 
     def message(self, msg, module_num=-1):
         '''Display a message to the user'''
-        log = self.module['logger']
-        log(msg)
+        logger = self.module['logger']
+        logger(msg)
 
 class Queue(object):
 
