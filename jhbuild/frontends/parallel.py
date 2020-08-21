@@ -3,11 +3,15 @@ import logging
 import subprocess
 import sys
 import select
+import signal
+
 from threading import Thread
 from threading import Event
 from threading import Lock
 from threading import Condition
 from datetime import datetime
+from time import sleep
+from contextlib import contextmanager
 
 from jhbuild.frontends.buildscript import BuildScript
 from jhbuild.errors import CommandError, FatalError, SkipToEnd
@@ -26,6 +30,7 @@ class ParallelBuildScript(BuildScript):
                 'dependencies': None,
                 'worker': None,
                 'success': False,
+                'skipped': False,
                 'finished': Event(),
                 'log': '',
                 'logger': None,
@@ -33,9 +38,7 @@ class ParallelBuildScript(BuildScript):
             for module in self.module_list
         }
 
-        self.cancel = False
-        self.cancel_lock = Lock()
-        self.cancel_first_module = None
+        self.cancel = {'value': False}
 
         for module in self.module_list:
             self.modules[module.name]['dependencies'] = [self.modules[dependency] for dependency in module.dependencies if dependency in self.modules]
@@ -49,38 +52,46 @@ class ParallelBuildScript(BuildScript):
 
         self.worker_queue = Queue(range(1)) # TODO
 
-    def __set_cancel(self, module, cancel):
-        with self.cancel_lock:
-            if (not self.cancel) and cancel:
-                self.cancel_first_module = module
-            self.cancel = self.cancel or cancel
-
     def build(self, phases=None):
-        try:
-            logging.info('creating workers')
-            for module in self.module_list:
-                self.modules[module.name]['worker'] = Thread(target=self.build_one, args=[phases, self.modules[module.name]])
-            logging.info('start workers')
+        logging.info('creating workers')
+        for module in self.module_list:
+            self.modules[module.name]['worker'] = Thread(target=self.build_one, args=[phases, self.modules[module.name]])
+        logging.info('start workers')
+
+        cancel_detected = False
+
+        with self.handle_signal():
             for module in self.module_list:
                 self.modules[module.name]['worker'].start()
+            while not self.check_build_finish():
+                if self.cancel['value'] and (not cancel_detected):
+                    logging.info('cancel is reqested.')
+                    cancel_detected = True
+                sleep(1)
             for module in self.module_list:
-                while True:
-                    try:
-                        self.modules[module.name]['worker'].join()
-                        break
-                    except Exception as e:
-                        logging.error(e)
-                logging.info('confirmed module %s finished.', self.modules[module.name])
-        finally:
-            if not all(map(lambda x: x['success'], self.modules.values())):
-                total = len(self.modules)
-                success = sum(map(lambda x: int(x['success'] == True), self.modules.values()))
-                fail = total - success
-                logging.info('Not all modules succeeded. total = %d, success = %d, fail = %d', total, success, fail)
-                logging.info('First failed module = %s', self.cancel_first_module['name'])
-        return 0
+                self.modules[module.name]['worker'].join()
+
+        total = len(self.modules)
+        success = sum(map(lambda x: int(x['success'] == True), self.modules.values()))
+        skipped = sum(map(lambda x: int(x['skipped'] == True), self.modules.values()))
+        fail = total - success - skipped
+        logging.info('total = %d, success = %d, skipped = %d, fail = %d', total, success, skipped, fail)
+        return total == success + skipped
+
+    def check_build_finish(self):
+        return all([not module['worker'].is_alive() for module in self.modules.values()])
+
+    @contextmanager
+    def handle_signal(self):
+        prev_handler = signal.getsignal(signal.SIGINT)
+        def handler(signum, stack):
+            self.cancel['value'] = True
+        signal.signal(signal.SIGINT, handler)
+        yield
+        signal.signal(signal.SIGINT, prev_handler)
 
     def build_one(self, phases, module):
+        worker = None
         logger = module['logger']
         logger('start')
         try:
@@ -88,43 +99,46 @@ class ParallelBuildScript(BuildScript):
                 dependency['finished'].wait()
 
             worker = self.worker_queue.pop()
-            cancel = True
-            try:
-                if self.cancel:
-                    return
+            if self.cancel['value']:
+                module['success'] = False
+                module['skipped'] = True
+                return
 
-                if self.check_skip(module):
-                    return
+            if self.check_skip(module):
+                module['success'] = False
+                module['skipped'] = True
+                return
 
-                if not phases:
-                    build_phases = self.get_build_phases(module['instance'])
-                else:
-                    build_phases = phases
+            if not phases:
+                build_phases = self.get_build_phases(module['instance'])
+            else:
+                build_phases = phases
 
-                for build_phase in build_phases:
-                    logger('%s %s' %(module['name'], build_phase))
+            for build_phase in build_phases:
+                logger('%s %s' %(module['name'], build_phase))
 
-                    # Module will call back BuildScript's method like execute, but it does not pass current module.
-                    proxy = ParallelBuildScriptProxy(self.config, self.module_list, self.module_set, self.modules, module)
-                    try:
-                        error, altphases = module['instance'].run_phase(proxy, build_phase)
-                    except SkipToEnd:
-                        logger('skiped')
-                        error = False
-                    if error:
-                        module['success'] = False
-                        logger('error = %s' % error)
-                        return
-                cancel = False
-            finally:
-                self.__set_cancel(module, cancel)
-                self.worker_queue.push(worker)
+                # Module will call back BuildScript's method like execute, but it does not pass current module.
+                proxy = ParallelBuildScriptProxy(self.config, self.module_list, self.module_set, self.modules, module, self.cancel)
+                try:
+                    error, altphases = module['instance'].run_phase(proxy, build_phase)
+                except SkipToEnd:
+                    logger('skiped')
+                    error = False
+                if error:
+                    raise Exception(error)
+            module['success'] = True
+            module['skipped'] = False
         except Exception as e:
             logging.exception(e)
             logger('error = %s' % str(e))
+            module['success'] = False
+            module['skipped'] = False
+            self.cancel['value'] = True
         finally:
             logger('finished')
             module['finished'].set()
+            if worker is not None:
+                self.worker_queue.push(worker)
 
     def check_skip(self, module):
         logger = module['logger']
@@ -138,11 +152,12 @@ class ParallelBuildScript(BuildScript):
 
 class ParallelBuildScriptProxy(BuildScript):
 
-    def __init__(self, config, module_list, module_set, modules, module):
+    def __init__(self, config, module_list, module_set, modules, module, cancel):
         # BuildScript is not derived from object.
         BuildScript.__init__(self, config, module_list, module_set)
         self.modules = modules
         self.module = module
+        self.cancel = cancel
 
     def set_action(self, action, module, module_num=-1, action_target=None):
         self.modules[module.name]['logger']('set_action: action = %s' % action)
@@ -153,9 +168,14 @@ class ParallelBuildScriptProxy(BuildScript):
             raise CommandError(_('No command given'))
 
         kws = {
-            'close_fds': True
-            }
-        print_args = {'cwd': ''}
+            'close_fds': True,
+            'preexec_fn': os.setsid,
+        }
+
+        print_args = {
+            'cwd': ''
+        }
+
         if cwd:
             print_args['cwd'] = cwd
         else:
@@ -208,9 +228,10 @@ class ParallelBuildScriptProxy(BuildScript):
         except OSError as e:
             raise CommandError(str(e))
 
-        self.process_popen(p)
+        return self.process_popen(p)
 
     def process_popen(self, popen):
+        log = self.module['logger']
         read_set = []
         if popen.stdout:
             read_set.append(popen.stdout)
@@ -218,6 +239,10 @@ class ParallelBuildScriptProxy(BuildScript):
             read_set.append(popen.stderr)
         try:
             while read_set:
+                if self.cancel['value']:
+                    log('got cancel request.')
+                    os.kill(popen.pid, signal.SIGINT)
+                    break
                 rlist, wlist, xlist = select.select(read_set, [], [])
                 for fd in rlist:
                     line = fd.readline()
@@ -228,7 +253,7 @@ class ParallelBuildScriptProxy(BuildScript):
         except KeyboardInterrupt:
             # interrupt received.  Send SIGINT to child process.
             try:
-                os.kill(popen.pid, SIGINT)
+                os.kill(popen.pid, signal.SIGINT)
             except OSError:
                 # process might already be dead.
                 pass
