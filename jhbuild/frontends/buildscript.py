@@ -22,6 +22,7 @@ import os
 import logging
 import subprocess
 import sys
+from threading import Condition
 
 from jhbuild.utils import trigger
 from jhbuild.utils import cmds
@@ -341,3 +342,21 @@ class BuildScript:
     def handle_error(self, module, phase, nextphase, error, altphases):
         '''handle error during build'''
         raise NotImplementedError
+
+class Queue(object):
+
+    def __init__(self):
+        self.__items = []
+        self.__cv = Condition()
+
+    def pop(self):
+        with self.__cv:
+            while len(self.__items) == 0:
+                self.__cv.wait()
+            return self.__items.pop(0)
+
+    def push(self, item):
+        with self.__cv:
+            self.__items.append(item)
+            self.__cv.notify()
+
