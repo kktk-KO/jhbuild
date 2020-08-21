@@ -112,11 +112,17 @@ class ParallelBuildScript(BuildScript):
 
     def build_one(self, phases, module):
         worker = None
-        logger = module['logger']
-        logger('start')
         try:
+            logger = module['logger']
+            logger('start')
+
             for dependency in module['dependencies']:
-                dependency['finished'].wait()
+                while not dependency['finished'].wait(1):
+                    if self.cancel['value']:
+                        module['success'] = False
+                        module['fail'] = False
+                        module['skipped'] = True
+                        return
 
             worker = self.worker_queue.pop()
             if self.cancel['value']:
@@ -159,8 +165,8 @@ class ParallelBuildScript(BuildScript):
             module['skipped'] = False
             self.cancel['value'] = True
         finally:
-            logger('finished')
             module['finished'].set()
+            logger('finished')
             if worker is not None:
                 self.worker_queue.push(worker)
 
@@ -261,26 +267,16 @@ class ParallelBuildScriptProxy(BuildScript):
             read_set.append(popen.stdout)
         if popen.stderr:
             read_set.append(popen.stderr)
-        try:
-            while read_set:
-                if self.cancel['value']:
-                    logger('got cancel request.')
-                    os.kill(popen.pid, signal.SIGINT)
-                    break
-                rlist, wlist, xlist = select.select(read_set, [], [], 0.5)
-                for fd in rlist:
-                    line = fd.readline()
-                    if len(line) == 0:
-                        read_set.remove(fd)
-                    else:
-                        self.module['log'] += line
-        except KeyboardInterrupt:
-            # interrupt received.  Send SIGINT to child process.
-            try:
+        while read_set:
+            if self.cancel['value'] and popen.poll() == None:
                 os.kill(popen.pid, signal.SIGINT)
-            except OSError:
-                # process might already be dead.
-                pass
+            rlist, wlist, xlist = select.select(read_set, [], [], 0.5)
+            for fd in rlist:
+                line = fd.readline()
+                if len(line) == 0:
+                    read_set.remove(fd)
+                else:
+                    self.module['log'] += line
         return popen.wait()
 
     def message(self, msg, module_num=-1):
