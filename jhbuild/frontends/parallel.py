@@ -48,6 +48,10 @@ class ParallelBuildScript(BuildScript):
         for module in self.module_list:
             def Logger(name):
                 def wrapper(content):
+                    try:
+                        content = content.decode('ascii')
+                    except:
+                        content = ''
                     self.modules[name]['log'] += datetime.now().isoformat() + ' ' + content + '\n'
                 return wrapper
             self.modules[module.name]['logger'] = Logger(module.name)
@@ -276,7 +280,7 @@ class ParallelBuildScriptProxy(BuildScript):
                 if len(line) == 0:
                     read_set.remove(fd)
                 else:
-                    self.module['log'] += line
+                    logger(line)
         return popen.wait()
 
     def message(self, msg, module_num=-1):
