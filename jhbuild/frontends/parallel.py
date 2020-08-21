@@ -261,7 +261,7 @@ class ParallelBuildScriptProxy(BuildScript):
                     logger('got cancel request.')
                     os.kill(popen.pid, signal.SIGINT)
                     break
-                rlist, wlist, xlist = select.select(read_set, [], [])
+                rlist, wlist, xlist = select.select(read_set, [], [], 0.5)
                 for fd in rlist:
                     line = fd.readline()
                     if len(line) == 0:
