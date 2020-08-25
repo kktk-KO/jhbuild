@@ -468,6 +468,7 @@ them into the prefix."""
 
         # simon: dump sysdeps
         logging.info(_('Finding system dependencies ...'))
+
         systemdependencies, notfounds, rdependencies = self._find_executable_system_dependencies(destdir_prefix, buildscript.config.prefix)
         if notfounds:
             broken = set()

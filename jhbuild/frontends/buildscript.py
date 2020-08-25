@@ -29,6 +29,7 @@ from jhbuild.utils import cmds
 from jhbuild.errors import FatalError, CommandError, SkipToPhase, SkipToEnd
 
 class BuildScript:
+
     def __init__(self, config, module_list=None, module_set=None):
         if self.__class__ is BuildScript:
             raise NotImplementedError('BuildScript is an abstract base class')
@@ -71,7 +72,7 @@ class BuildScript:
 
             elif cmds.has_command('nice'):
                 self.subprocess_nice_args.append('nice')
-                
+
             ionice_args = ['ionice', '-c', '3', '-t']
             if cmds.has_command('ionice'):
                 subproc = subprocess.Popen(ionice_args + ['true'], stdout=devnull,
@@ -99,7 +100,7 @@ class BuildScript:
     def build(self, phases=None):
         '''start the build of the current configuration'''
         self.start_build()
-        
+
         failures = [] # list of modules that couldn't be built
         successes = []
         self.module_num = 0
@@ -359,4 +360,3 @@ class Queue(object):
         with self.__cv:
             self.__items.append(item)
             self.__cv.notify()
-

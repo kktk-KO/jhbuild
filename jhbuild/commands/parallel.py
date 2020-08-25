@@ -23,6 +23,12 @@ class cmd_parallel_build(BuildCommand):
             make_option('--build-optional-modules',
                         action='store_true', dest='build_optional_modules', default=False,
                         help=_('also build soft-dependencies that could be skipped')),
+            make_option('-w', '--worker',
+                        action='store', dest='num_worker', default=2,
+                        help=_('number of workers')),
+            make_option('-l', '--log',
+                        action='store', dest='log_dir', default=None,
+                        help=_('directory path where log files are stored')),
 
             ])
 
