@@ -120,10 +120,8 @@ class ParallelBuildScript(BuildScript):
                     logging.info('assigned task %s to %s' % (task, worker))
                     del tasks[task.key]
                     return
-            logging.info('wait for worker')
             with worker_cv:
                 worker_cv.wait(1.0)
-            logging.info('waited for worker')
 
     def check_skip(self, module):
         if self.config.min_age is not None:
