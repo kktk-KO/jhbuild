@@ -20,5 +20,5 @@ app_PYTHON = \
 	sysdeps.py \
 	tinderbox.py \
 	twoninetynine.py \
-	uninstall.py
-
+	uninstall.py \
+	parallel.py

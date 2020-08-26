@@ -17,5 +17,6 @@ app_PYTHON = \
 	buildscript.py \
 	gtkui.py \
 	terminal.py \
-	tinderbox.py
+	tinderbox.py \
+	parallel.py
 
