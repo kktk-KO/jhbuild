@@ -38,15 +38,15 @@ class ParallelBuildScript(BuildScript):
         lastTasks = {}
         for module in self.module_list:
             build_phases = self.get_build_phases(module) if not phases else phases
-	    build_phases = filter(lambda phase: module.has_phase(phase), build_phases)
-	    build_phases = filter(lambda phase: not module.skip_phase(self, phase, None), build_phases)
+            build_phases = filter(lambda phase: module.has_phase(phase), build_phases)
+            build_phases = filter(lambda phase: not module.skip_phase(self, phase, None), build_phases)
             prev = None
             skip = self.check_skip(module)
             for phase in build_phases:
                 if phase == 'checkout' and hasattr(module, 'branch') and hasattr(module.branch, 'repomodule'):
-		    key = (module.branch.repomodule, phase)
+                    key = (module.branch.repomodule, phase)
                 else:
-	            key = (module.name, phase)
+                    key = (module.name, phase)
                 if key not in tasks:
                     tasks[key] = Task(key, module, phase)
                 if prev is None:
@@ -58,7 +58,7 @@ class ParallelBuildScript(BuildScript):
                     tasks[key].success = True
                 prev = tasks[key]
             if prev is not None:
-            	lastTasks[module.name] = prev
+                lastTasks[module.name] = prev
 
         for task in firstTasks.values():
             for dep in task.module.dependencies:
