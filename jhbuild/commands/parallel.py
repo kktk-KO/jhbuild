@@ -4,6 +4,7 @@ import logging
 
 import jhbuild.moduleset
 import jhbuild.frontends.parallel
+from jhbuild.errors import FatalError
 from jhbuild.commands import Command, BuildCommand, register_command
 
 class cmd_parallel_build(BuildCommand):

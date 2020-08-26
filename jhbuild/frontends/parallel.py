@@ -25,7 +25,6 @@ class ParallelBuildScript(BuildScript):
         BuildScript.__init__(self, config, module_list, module_set)
         self.module_list = module_list
         self.module_set = module_set
-        self.check_cancel_interval = 1.0
         self.print_status_interval = 10.0
         self.num_worker = int(self.config.cmdline_options.num_worker)
         self.log_dir = self.config.cmdline_options.log_dir
@@ -39,14 +38,15 @@ class ParallelBuildScript(BuildScript):
         lastTasks = {}
         for module in self.module_list:
             build_phases = self.get_build_phases(module) if not phases else phases
-            build_phases = filter(lambda phase: module.has_phase(phase), build_phases)
+	    build_phases = filter(lambda phase: module.has_phase(phase), build_phases)
+	    build_phases = filter(lambda phase: not module.skip_phase(self, phase, None), build_phases)
             prev = None
             skip = self.check_skip(module)
             for phase in build_phases:
                 if phase == 'checkout' and hasattr(module, 'branch') and hasattr(module.branch, 'repomodule'):
-                    key = (module.branch.repomodule, phase)
+		    key = (module.branch.repomodule, phase)
                 else:
-                    key = (module.name, phase)
+	            key = (module.name, phase)
                 if key not in tasks:
                     tasks[key] = Task(key, module, phase)
                 if prev is None:
@@ -58,7 +58,7 @@ class ParallelBuildScript(BuildScript):
                     tasks[key].success = True
                 prev = tasks[key]
             if prev is not None:
-                lastTasks[module.name] = prev
+            	lastTasks[module.name] = prev
 
         for task in firstTasks.values():
             for dep in task.module.dependencies:
@@ -68,44 +68,18 @@ class ParallelBuildScript(BuildScript):
         logging.info('created %d tasks from %d modules' % (len(tasks), len(self.module_list)))
 
         logging.info('starting workers')
-        worker_available_cv = Condition()
-        workers = [ Worker(worker_available_cv, self.config, self.module_list, self.module_set, self.log_dir) for i in range(self.num_worker)]
+        worker_cv = Condition()
+        workers = [ Worker(worker_cv, self.config, self.module_list, self.module_set, self.log_dir) for i in range(self.num_worker)]
         for worker in workers:
             worker.start()
+        unassignedTasks = dict(tasks)
 
-        unassignedTasks = [ task for task in tasks.values() ]
-        cursor = 0
-
-        with self.handle_signal(workers):
-            while len(unassignedTasks) > 0:
-                if self.cancel:
-                    break
-                cursor = (cursor + 1) % len(unassignedTasks)
-                task = unassignedTasks[cursor]
-                if not all([task2.finished for task2 in task.dependencies]):
-                    continue
-                if not all([task2.success for task2 in task.dependencies]):
-                    task.finished = True
-                    task.skip = True
-                    unassignedTasks.pop(cursor)
-                    continue
-                logging.info('assigining task %s' % task)
-                assigned = False
-                while not assigned:
-                    if self.cancel:
-                        break
-                    with worker_available_cv:
-                        while not assigned:
-                            if self.cancel:
-                                break
-                            for worker in workers:
-                                if worker.set_task(task):
-                                    logging.info('assigned task %s to %s' % (task, worker))
-                                    assigned = True
-                                    unassignedTasks.pop(cursor)
-                                    break
-                            worker_available_cv.wait(1.0)
-
+        while len(unassignedTasks) > 0:
+            if self.cancel:
+                break
+            task = self.get_task(unassignedTasks, worker_cv)
+            if task is not None:
+                self.assign_task(unassignedTasks, task, workers, worker_cv) 
         logging.info('stopping build')
         for worker in workers:
             worker.set_cancel()
@@ -116,31 +90,44 @@ class ParallelBuildScript(BuildScript):
         success = True
         for task in tasks.values():
             if (task.finished) and (not task.skip) and (not task.success):
-                logging.warn('task %s failed.' % task)
+                logging.warn('task %s failed. error = %s' % (task, task.error))
                 success = False
         if success:
             logging.info('no build failed')
 
-    @contextmanager
-    def handle_signal(self, workers):
-        signals = [signal.SIGINT, signal.SIGTERM]
-        prev_handlers = {
-            s: signal.getsignal(s)
-            for s in signals
-        }
-        def handler(signum, stack):
-            self.cancel = True
+    def get_task(self, tasks, worker_cv):
+        logging.info('getting task')
+        while True:
+            if self.cancel:
+                return
+            for key, task in tasks.items():
+                if len(task.dependencies) == 0 or all([task2.finished for task2 in task.dependencies]):
+                    if not all([task2.success for task2 in task.dependencies]):
+                        del tasks[key]
+                        continue
+                    logging.info('got task %s' % task)
+                    return task
+            with worker_cv:
+                worker_cv.wait(1.0)
+
+    def assign_task(self, tasks, task, workers, worker_cv):
+        logging.info('assigining task %s' % task)
+        while True:
+            if self.cancel:
+                break
             for worker in workers:
-                worker.set_cancel()
-        for s in signals:
-            signal.signal(s, handler)
-        yield
-        for s in signals:
-            signal.signal(s, prev_handlers[s])
+                if worker.set_task(task):
+                    logging.info('assigned task %s to %s' % (task, worker))
+                    del tasks[task.key]
+                    return
+            logging.info('wait for worker')
+            with worker_cv:
+                worker_cv.wait(1.0)
+            logging.info('waited for worker')
 
     def check_skip(self, module):
         if self.config.min_age is not None:
-            installdate = eslf.module_set.packagedb.installdate(module['name'])
+            installdate = self.module_set.packagedb.installdate(module['name'])
             if installdate > self.config.min_age:
                 return True
         return False
@@ -162,7 +149,7 @@ class ParallelBuildScriptProxy(BuildScript):
 
         kws = {
             'close_fds': True,
-            'preexec_fn': os.setsid,
+        #    'preexec_fn': os.setsid,
         }
 
         print_args = {
@@ -214,39 +201,12 @@ class ParallelBuildScriptProxy(BuildScript):
 
         kws['stderr'] = subprocess.STDOUT
         command = self._prepare_execute(command)
-        try:
-            if self.__log_file is not None:
-                with open(self.__log_file, 'w') as f:
-                    kws['stdout'] = f
-                    p = subprocess.Popen(command, **kws)
-            else:
-                p = subprocess.Popen(command, **kws)
-        except OSError as e:
-            raise CommandError(str(e))
-
-        code = self.process_popen(p)
-        if code > 0:
-            raise CommandError('Command exited with %d' % code)
-        #if code < 0:
-        #    raise CommandError('Command is interrupted by signal %d' % (-code))
-
-    def process_popen(self, popen):
-        read_set = []
-        if popen.stdout:
-            read_set.append(popen.stdout)
-        if popen.stderr:
-            read_set.append(popen.stderr)
-        while read_set:
-            if self.__is_cancel_fn() and popen.poll() == None:
-                os.killpg(popen.pid, signal.SIGTERM)
-            rlist, wlist, xlist = select.select(read_set, [], [], 0.5)
-            for fd in rlist:
-                line = fd.readline()
-                if len(line) == 0:
-                    read_set.remove(fd)
-                else:
-                    self.message(line)
-        return popen.wait()
+        if self.__log_file is not None:
+            with open(self.__log_file, 'w') as f:
+                kws['stdout'] = f
+                subprocess.check_call(command, **kws)
+        else:
+            subprocess.check_call(command, **kws)
 
     def message(self, msg, module_num=-1):
         '''Display a message to the user'''
