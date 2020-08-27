@@ -31,7 +31,6 @@ class ParallelBuildScript(BuildScript):
         self.cancel = False
 
     def build(self, phases=None):
-
         # create tasks
         tasks = {}
         firstTasks = {}
@@ -74,26 +73,27 @@ class ParallelBuildScript(BuildScript):
             worker.start()
         unassignedTasks = dict(tasks)
 
-        while len(unassignedTasks) > 0:
-            if self.cancel:
-                break
-            task = self.get_task(unassignedTasks, worker_cv)
-            if task is not None:
-                self.assign_task(unassignedTasks, task, workers, worker_cv) 
-        logging.info('stopping build')
-        for worker in workers:
-            worker.set_cancel()
-        for worker in workers:
-            worker.join()
-        logging.info('finished build')
+        with self.handle_signal(workers):
+            while len(unassignedTasks) > 0:
+                if self.cancel:
+                    break
+                task = self.get_task(unassignedTasks, worker_cv)
+                if task is not None:
+                    self.assign_task(unassignedTasks, task, workers, worker_cv) 
+            logging.info('stopping build')
+            for worker in workers:
+                worker.set_cancel()
+            for worker in workers:
+                worker.join()
+            logging.info('finished build')
 
-        success = True
-        for task in tasks.values():
-            if (task.finished) and (not task.skip) and (not task.success):
-                logging.warn('task %s failed. error = %s' % (task, task.error))
-                success = False
-        if success:
-            logging.info('no build failed')
+            success = True
+            for task in tasks.values():
+                if (task.finished) and (not task.skip) and (not task.success):
+                    logging.warn('task %s failed. error = %s' % (task, task.error))
+                    success = False
+            if success:
+                logging.info('no build failed')
 
     def get_task(self, tasks, worker_cv):
         logging.info('getting task')
@@ -130,6 +130,25 @@ class ParallelBuildScript(BuildScript):
                 return True
         return False
 
+    @contextmanager
+    def handle_signal(self, workers):
+        signals = [signal.SIGINT, signal.SIGTERM]
+        prev_handlers = {
+            s: signal.getsignal(s)
+            for s in signals
+        }
+        def handler(signum, stack):
+            self.cancel = True
+            for worker in workers:
+                worker.set_cancel()
+            if signum in prev_handlers:
+                prev_handlers[signum]()
+
+        for sig in signals:
+            signal.signal(sig, handler)
+        yield
+        for sig in signals:
+            signal.signal(sig, prev_handlers[sig])
 class ParallelBuildScriptProxy(BuildScript):
 
     def __init__(self, config, module_list, module_set, is_cancel_fn, log_file):
@@ -273,6 +292,8 @@ class Worker(Thread):
                 error, altphases = task.module.run_phase(proxy, task.phase)
             except Exception as e:
                 error = str(e)
+            except:
+                error = 'unknown error'
             task.finished = True
             task.success = not bool(error)
             task.error = error
