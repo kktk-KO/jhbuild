@@ -71,7 +71,11 @@ class ParallelBuildScript(BuildScript):
         workers = [ Worker(worker_cv, self.config, self.module_list, self.module_set, self.log_dir) for i in range(self.num_worker)]
         for worker in workers:
             worker.start()
-        unassignedTasks = dict(tasks)
+
+        unassignedTasks = {
+            key: task
+            for key, task in tasks.iteritems() if not task.finished
+        }
 
         with self.handle_signal(workers):
             while len(unassignedTasks) > 0:
