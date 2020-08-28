@@ -31,6 +31,9 @@ class ParallelBuildScript(BuildScript):
         self.cancel = False
 
     def build(self, phases=None):
+
+        os.makedirs(self.log_dir)
+
         # create tasks
         tasks = {}
         firstTasks = {}
