@@ -107,6 +107,8 @@ class ParallelBuildScript(BuildScript):
         while True:
             if self.cancel:
                 return
+            if len(unassignedTasks) == 0:
+                return
             for key, task in tasks.items():
                 if len(task.dependencies) == 0 or all([task2.finished for task2 in task.dependencies]):
                     if not all([task2.success for task2 in task.dependencies]):
