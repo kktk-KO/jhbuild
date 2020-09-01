@@ -32,7 +32,10 @@ class ParallelBuildScript(BuildScript):
 
     def build(self, phases=None):
 
-        os.makedirs(self.log_dir)
+        try:
+            os.makedirs(self.log_dir)
+        except:
+            pass
 
         # create tasks
         tasks = {}
