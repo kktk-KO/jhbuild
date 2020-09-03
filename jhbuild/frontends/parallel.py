@@ -25,7 +25,6 @@ class ParallelBuildScript(BuildScript):
         BuildScript.__init__(self, config, module_list, module_set)
         self.module_list = module_list
         self.module_set = module_set
-        self.print_status_interval = 10.0
         self.num_worker = int(self.config.cmdline_options.num_worker)
         self.log_dir = self.config.cmdline_options.log_dir
         self.cancel = False
@@ -154,13 +153,15 @@ class ParallelBuildScript(BuildScript):
             for worker in workers:
                 worker.set_cancel()
             if signum in prev_handlers:
-                prev_handlers[signum]()
+                if callable(prev_handlers[signum]):
+                    prev_handlers[signum]()
 
         for sig in signals:
             signal.signal(sig, handler)
         yield
         for sig in signals:
             signal.signal(sig, prev_handlers[sig])
+
 class ParallelBuildScriptProxy(BuildScript):
 
     def __init__(self, config, module_list, module_set, is_cancel_fn, log_file):
