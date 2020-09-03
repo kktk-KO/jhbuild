@@ -296,6 +296,7 @@ class Worker(Thread):
                     self.__cv.wait(1)
                 task = self.__task
             if self.__cancel:
+                logging.warn('%r got cancel request.', self)
                 break
 
             file_name = ('%s_%s.log' % task.key).replace('/', '_')
@@ -310,6 +311,11 @@ class Worker(Thread):
             task.finished = True
             task.success = not bool(error)
             task.error = error
+            if task.success:
+                logging.info('%r finished task %s .', self, task)
+            else:
+                logging.info('%r failed task %s .', self, task)
+
             with self.__cv:
                 self.__task = None
             with self.__notify_available_cv:
