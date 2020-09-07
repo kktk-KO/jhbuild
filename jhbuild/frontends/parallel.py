@@ -103,6 +103,9 @@ class ParallelBuildScript(BuildScript):
                     success = False
             if success:
                 logging.info('no build failed')
+                return 0
+            else:
+                return 1
 
     def get_task(self, tasks, worker_cv):
         logging.info('getting task')
