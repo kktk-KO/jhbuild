@@ -165,6 +165,10 @@ class ParallelBuildScript(BuildScript):
         for sig in signals:
             signal.signal(sig, prev_handlers[sig])
 
+    def message(self, msg, module_num=-1):
+        '''Display a message to the user'''
+        print(msg)
+
 class ParallelBuildScriptProxy(BuildScript):
 
     def __init__(self, config, module_list, module_set, is_cancel_fn, log_file):
