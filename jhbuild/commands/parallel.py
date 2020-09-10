@@ -30,7 +30,9 @@ class cmd_parallel_build(BuildCommand):
             make_option('-l', '--log',
                         action='store', dest='log_dir', default=None,
                         help=_('directory path where log files are stored')),
-
+            make_option('-n', '--no-network',
+                        action='store_true', dest='nonetwork', default=False,
+                        help=_('skip version control update')),
             ])
 
     def run(self, config, options, args, help=None):
