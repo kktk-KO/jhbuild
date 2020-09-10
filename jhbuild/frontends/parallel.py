@@ -40,10 +40,17 @@ class ParallelBuildScript(BuildScript):
         tasks = {}
         firstTasks = {}
         lastTasks = {}
+
+        def skip_phase(module, phase):
+            try:
+                return module.skip_phase(self, phase, None)
+            except SkipToEnd:
+                return True
+
         for module in self.module_list:
             build_phases = self.get_build_phases(module) if not phases else phases
             build_phases = filter(lambda phase: module.has_phase(phase), build_phases)
-            build_phases = filter(lambda phase: not module.skip_phase(self, phase, None), build_phases)
+            build_phases = filter(lambda phase: not skip_phase(module, phase), build_phases)
             prev = None
             skip = self.check_skip(module)
             for phase in build_phases:
