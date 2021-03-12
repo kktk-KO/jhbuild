@@ -38,8 +38,8 @@ class ParallelBuildScript(BuildScript):
 
         # create tasks
         tasks = {}
-        firstTasks = {}
-        lastTasks = {}
+        module_first_tasks = {}
+        module_last_tasks = {}
 
         def skip_phase(module, phase):
             try:
@@ -61,58 +61,78 @@ class ParallelBuildScript(BuildScript):
                 if key not in tasks:
                     tasks[key] = Task(key, module, phase)
                 if prev is None:
-                    firstTasks[module.name] = tasks[key]
+                    module_first_tasks[module.name] = tasks[key]
                 else:
                     tasks[key].dependencies.append(prev)
                 if skip:
                     tasks[key].finished = True
-                    tasks[key].success = True
+                    tasks[key].skip = True
                 prev = tasks[key]
             if prev is not None:
-                lastTasks[module.name] = prev
+                module_last_tasks[module.name] = prev
 
-        for task in firstTasks.values():
+        for task in module_first_tasks.values():
             for dep in task.module.dependencies:
-                if dep in lastTasks:
-                    task.dependencies.append(lastTasks[dep])
+                if dep in module_last_tasks:
+                    task.dependencies.append(module_last_tasks[dep])
 
         logging.info('created %d tasks from %d modules' % (len(tasks), len(self.module_list)))
 
         logging.info('starting workers')
-        worker_cv = Condition()
-        workers = [ Worker(worker_cv, self.config, self.module_list, self.module_set, self.log_dir) for i in range(self.num_worker)]
+
+        num_tasks = len(tasks)
+        task_queue = Queue([task for task in tasks.values() if len(task.dependencies) == 0 and not task.finished])
+
+        workers = [
+            Worker(
+                task_queue,
+                self.config,
+                self.module_list,
+                self.module_set,
+                self.log_dir,
+            )
+            for i in range(self.num_worker)
+        ]
+
         for worker in workers:
             worker.start()
 
-        unassignedTasks = {
-            key: task
-            for key, task in tasks.iteritems() if not task.finished
-        }
+        def RunIPython(tasks, workers, task_queue):
+            import IPython; IPython.embed()
 
-        with self.handle_signal(workers):
-            while len(unassignedTasks) > 0:
-                if self.cancel:
+        ipython = Thread(target=RunIPython, args=[tasks, workers, task_queue])
+        ipython.start()
+
+        with self.handle_signal(task_queue):
+            while True:
+                if task_queue.is_cancel():
                     break
-                task = self.get_task(unassignedTasks, worker_cv)
-                if task is not None:
-                    self.assign_task(unassignedTasks, task, workers, worker_cv) 
-            logging.info('stopping build')
-            for worker in workers:
-                worker.set_cancel()
-            for worker in workers:
-                worker.join()
-            logging.info('finished build')
+                if all([task.finished for task in tasks.itervalues()]):
+                    break
+                for task in tasks.itervalues():
+                    if task.queued:
+                        continue
+                    if all([dep.finished for dep in task.dependencies]):
+                        task.queued = True
+                        task_queue.push(task)
+                sleep(0.5)
 
-            success = True
-            for task in tasks.values():
-                if (task.finished) and (not task.skip) and (not task.success):
-                    logging.warn('task %s failed. error = %s' % (task, task.error))
-                    success = False
-            if success:
-                logging.info('no build failed')
-                return 0
-            else:
-                return 1
+        logging.info('stopping workers')
+        task_queue.cancel()
+        for worker in workers:
+            worker.join()
+        logging.info('stopped workers')
+
+        success = True
+        for task in tasks.values():
+            if (task.finished) and (not task.skip) and (not task.success):
+                logging.warn('task %s failed. error = %s' % (task, task.error))
+                success = False
+        if success:
+            logging.info('no build failed')
+            return 0
+        else:
+            return 1
 
     def get_task(self, tasks, worker_cv):
         logging.info('getting task')
@@ -152,7 +172,7 @@ class ParallelBuildScript(BuildScript):
         return False
 
     @contextmanager
-    def handle_signal(self, workers):
+    def handle_signal(self, task_queue):
         signals = [signal.SIGINT, signal.SIGTERM]
         prev_handlers = {
             s: signal.getsignal(s)
@@ -160,11 +180,10 @@ class ParallelBuildScript(BuildScript):
         }
         def handler(signum, stack):
             self.cancel = True
-            for worker in workers:
-                worker.set_cancel()
-            if signum in prev_handlers:
-                if callable(prev_handlers[signum]):
-                    prev_handlers[signum]()
+            task_queue.cancel()
+            #if signum in prev_handlers:
+            #    if callable(prev_handlers[signum]):
+            #        prev_handlers[signum]()
 
         for sig in signals:
             signal.signal(sig, handler)
@@ -178,11 +197,16 @@ class ParallelBuildScript(BuildScript):
 
 class ParallelBuildScriptProxy(BuildScript):
 
-    def __init__(self, config, module_list, module_set, is_cancel_fn, log_file):
+    def __init__(self, config, module_list, module_set, log_file):
         # BuildScript is not derived from object.
         BuildScript.__init__(self, config, module_list, module_set)
-        self.__is_cancel_fn = is_cancel_fn
         self.__log_file = log_file
+        self.__log_file_fd = open(self.__log_file, 'w') if log_file is not None else None
+
+    def finalize(self):
+        if self.__log_fild_fd is not None:
+            os.close(self.__log_fild_fd)
+            self.__log_fild_fd = None
 
     def set_action(self, action, module, module_num=-1, action_target=None):
         self.message('set_action: action = %s' % action)
@@ -246,15 +270,18 @@ class ParallelBuildScriptProxy(BuildScript):
         kws['stderr'] = subprocess.STDOUT
         command = self._prepare_execute(command)
         if self.__log_file is not None:
-            with open(self.__log_file, 'w') as f:
-                kws['stdout'] = f
-                subprocess.check_call(command, **kws)
+            kws['stdout'] = self.__log_file_fd
+            subprocess.check_call(command, **kws)
+            self.__log_file_fd = None
         else:
             subprocess.check_call(command, **kws)
 
     def message(self, msg, module_num=-1):
         '''Display a message to the user'''
-        print(msg)
+        if self.__log_file_fd is not None:
+            self.__log_file_fd.write(msg + '\n')
+        else:
+            print(msg)
 
 class Task(object):
 
@@ -263,9 +290,10 @@ class Task(object):
         self.module = module
         self.phase = phase
         self.dependencies = []
-        self.finished = False
-        self.success = None
         self.skip = None
+        self.queued = False
+        self.success = None
+        self.finished = None
         self.error = None
 
     def __str__(self):
@@ -273,81 +301,74 @@ class Task(object):
 
 class Worker(Thread):
 
-    def __init__(self, notify_available_cv, config, module_list, module_set, log_dir):
+    def __init__(self, task_queue, config, module_list, module_set, log_dir):
         super(Worker, self).__init__(target=self.__run)
-        self.__task = None
-        self.__cv = Condition()
-        self.__cancel = False
-        self.__notify_available_cv = notify_available_cv
+        self.__task_queue = task_queue
+
         self.__config = config
         self.__module_list = module_list
         self.__module_set = module_set
         self.__log_dir = log_dir
 
-    def set_task(self, task):
-        with self.__cv:
-            if self.__task is not None:
-                return False
-            self.__task = task
-            self.__cv.notify_all()
-        return True
-
-    def set_cancel(self):
-        with self.__cv:
-            self.__cancel = True
-            self.__cv.notify_all()
-
-    def is_cancel(self):
-        with self.__cv:
-            return self.__cancel
-
     def __run(self):
-        while not self.__cancel:
-            with self.__cv:
-                while self.__task is None:
-                    if self.__cancel:
-                        break
-                    self.__cv.wait(1)
-                task = self.__task
-            if self.__cancel:
-                logging.warn('%r got cancel request.', self)
-                break
+        while True:
+            task = self.__task_queue.pop()
+            if task is None:
+                return
 
-            file_name = ('%s_%s.log' % task.key).replace('/', '_')
-            log_file = os.path.join(self.__log_dir, file_name) if self.__log_dir is not None else None
-            proxy = ParallelBuildScriptProxy(self.__config, self.__module_list, self.__module_set, self.is_cancel, log_file)
-            try:
-                error, altphases = task.module.run_phase(proxy, task.phase)
-            except Exception as e:
-                error = str(e)
-            except:
-                error = 'unknown error'
+            if not task.skip:
+                file_name = ('%s_%s.log' % task.key).replace('/', '_')
+                log_file = os.path.join(self.__log_dir, file_name) if self.__log_dir is not None else None
+                proxy = ParallelBuildScriptProxy(self.__config, self.__module_list, self.__module_set, log_file)
+                try:
+                    error, altphases = task.module.run_phase(proxy, task.phase)
+                except Exception as e:
+                    error = str(e)
+                except:
+                    error = 'unknown error'
+            else:
+                error = ''
+
             task.finished = True
             task.success = not bool(error)
             task.error = error
             if task.success:
-                logging.info('%r finished task %s .', self, task)
+                self.log('finished task %s', task)
             else:
-                logging.info('%r failed task %s .', self, task)
+                self.log('failed task %s: %s', task, task.error)
 
-            with self.__cv:
-                self.__task = None
-            with self.__notify_available_cv:
-                self.__notify_available_cv.notify_all()
+    def log(self, fmt, *args):
+        print(('[%s] ' % self) + fmt % args)
 
 class Queue(object):
 
     def __init__(self, items):
         self.__items = items
         self.__cv = Condition()
+        self.__cancel = False
 
     def pop(self):
         with self.__cv:
-            while len(self.__items) == 0:
+            while len(self.__items) == 0 and self.__cancel == False:
                 self.__cv.wait()
-            return self.__items.pop(0)
+            if self.__cancel:
+                return None
+            else:
+                return self.__items.pop(0)
 
     def push(self, item):
         with self.__cv:
             self.__items.append(item)
             self.__cv.notify()
+
+    def size(self):
+        with self.__cv:
+            return len(self.__items)
+
+    def cancel(self):
+        with self.__cv:
+            self.__cancel = True
+            self.__cv.notify()
+
+    def is_cancel(self):
+        return self.__cancel
