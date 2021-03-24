@@ -40,32 +40,38 @@ class ParallelBuildScript(BuildScript):
         tasks = {}
         module_first_tasks = {}
         module_last_tasks = {}
-
-        def skip_phase(module, phase):
-            try:
-                return module.skip_phase(self, phase, None)
-            except SkipToEnd:
-                return True
+        module_phases = {}
 
         for module in self.module_list:
             build_phases = self.get_build_phases(module) if not phases else phases
             build_phases = filter(lambda phase: module.has_phase(phase), build_phases)
-            build_phases = filter(lambda phase: not skip_phase(module, phase), build_phases)
             prev = None
             skip = self.check_skip(module)
-            for phase in build_phases:
+            for index, phase in enumerate(build_phases):
+                try:
+                    skip_phase = module.skip_phase(self, phase, build_phases[index - 1] if index > 0 else None)
+                except SkipToEnd:
+                    skip = True
+
                 if phase == 'checkout' and hasattr(module, 'branch') and hasattr(module.branch, 'repomodule'):
                     key = (module.branch.repomodule, phase)
                 else:
                     key = (module.name, phase)
                 if key not in tasks:
                     tasks[key] = Task(key, module, phase)
+
+                if module.name not in module_phases:
+                    module_phases[module.name] = []
+                for prev_phase in module_phases[module.name]:
+                    prev_phase.next_phases.append(tasks[key])
+                module_phases[module.name].append(tasks[key])
+
                 if prev is None:
                     module_first_tasks[module.name] = tasks[key]
                 else:
                     tasks[key].dependencies.append(prev)
-                if skip:
-                    tasks[key].finished = True
+
+                if skip or skip_phase:
                     tasks[key].skip = True
                 prev = tasks[key]
             if prev is not None:
@@ -81,10 +87,17 @@ class ParallelBuildScript(BuildScript):
         logging.info('starting workers')
 
         num_tasks = len(tasks)
-        task_queue = Queue([task for task in tasks.values() if len(task.dependencies) == 0 and not task.finished])
+        task_queue = Queue([])
+        for task in tasks.itervalues():
+            if task.finished:
+                continue
+            if len(task.dependencies) == 0:
+                task.queued = True
+                task_queue.push(task)
 
         workers = [
             Worker(
+                i,
                 task_queue,
                 self.config,
                 self.module_list,
@@ -97,11 +110,11 @@ class ParallelBuildScript(BuildScript):
         for worker in workers:
             worker.start()
 
-        def RunIPython(tasks, workers, task_queue):
-            import IPython; IPython.embed()
+#         def RunIPython(tasks, workers, task_queue):
+#             import IPython; IPython.embed()
 
-        ipython = Thread(target=RunIPython, args=[tasks, workers, task_queue])
-        ipython.start()
+#         ipython = Thread(target=RunIPython, args=[tasks, workers, task_queue])
+#         ipython.start()
 
         with self.handle_signal(task_queue):
             while True:
@@ -115,7 +128,7 @@ class ParallelBuildScript(BuildScript):
                     if all([dep.finished for dep in task.dependencies]):
                         task.queued = True
                         task_queue.push(task)
-                sleep(0.5)
+                sleep(0.1)
 
         logging.info('stopping workers')
         task_queue.cancel()
@@ -272,7 +285,6 @@ class ParallelBuildScriptProxy(BuildScript):
         if self.__log_file is not None:
             kws['stdout'] = self.__log_file_fd
             subprocess.check_call(command, **kws)
-            self.__log_file_fd = None
         else:
             subprocess.check_call(command, **kws)
 
@@ -289,6 +301,7 @@ class Task(object):
         self.key = key
         self.module = module
         self.phase = phase
+        self.next_phases = []
         self.dependencies = []
         self.skip = None
         self.queued = False
@@ -301,8 +314,9 @@ class Task(object):
 
 class Worker(Thread):
 
-    def __init__(self, task_queue, config, module_list, module_set, log_dir):
+    def __init__(self, worker_index, task_queue, config, module_list, module_set, log_dir):
         super(Worker, self).__init__(target=self.__run)
+        self.__worker_index = worker_index
         self.__task_queue = task_queue
 
         self.__config = config
@@ -311,10 +325,17 @@ class Worker(Thread):
         self.__log_dir = log_dir
 
     def __run(self):
+        self.log('start')
         while True:
             task = self.__task_queue.pop()
             if task is None:
-                return
+                break
+
+            assert all(map(lambda dep: dep.finished, task.dependencies))
+
+            if any(map(lambda dep: not dep.success, task.dependencies)):
+                task.skip = True 
+                self.log('failure in dependency. mark task %s as skipped.', task)
 
             if not task.skip:
                 file_name = ('%s_%s.log' % task.key).replace('/', '_')
@@ -322,6 +343,11 @@ class Worker(Thread):
                 proxy = ParallelBuildScriptProxy(self.__config, self.__module_list, self.__module_set, log_file)
                 try:
                     error, altphases = task.module.run_phase(proxy, task.phase)
+                except SkipToEnd:
+                    task.skip = True
+                    for next_phase in task.next_phases:
+                        next_phase.skip = True
+                    error = ''
                 except Exception as e:
                     error = str(e)
                 except:
@@ -332,13 +358,16 @@ class Worker(Thread):
             task.finished = True
             task.success = not bool(error)
             task.error = error
-            if task.success:
+            if task.skip:
+                self.log('skipped task %s', task)
+            elif task.success:
                 self.log('finished task %s', task)
             else:
                 self.log('failed task %s: %s', task, task.error)
+        self.log('stop')
 
     def log(self, fmt, *args):
-        print(('[%s] ' % self) + fmt % args)
+        print(('[Worker=%d] ' % self.__worker_index) + fmt % args)
 
 class Queue(object):
 
@@ -350,7 +379,7 @@ class Queue(object):
     def pop(self):
         with self.__cv:
             while len(self.__items) == 0 and self.__cancel == False:
-                self.__cv.wait()
+                self.__cv.wait(0.5)
             if self.__cancel:
                 return None
             else:

@@ -812,7 +812,6 @@ class DownloadableModule:
         # did the checkout succeed?
         if not os.path.exists(srcdir):
             raise BuildStateError(_('source directory %s was not created') % srcdir)
-
         if self.check_build_policy(buildscript) == self.PHASE_DONE:
             raise SkipToEnd()
 
