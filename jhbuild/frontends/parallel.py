@@ -338,6 +338,7 @@ class Worker(Thread):
                 self.log('failure in dependency. mark task %s as skipped.', task)
 
             if not task.skip:
+                self.log('starting task %s', task)
                 file_name = ('%s_%s.log' % task.key).replace('/', '_')
                 log_file = os.path.join(self.__log_dir, file_name) if self.__log_dir is not None else None
                 proxy = ParallelBuildScriptProxy(self.__config, self.__module_list, self.__module_set, log_file)
