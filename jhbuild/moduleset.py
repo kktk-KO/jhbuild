@@ -451,7 +451,12 @@ def _handle_conditions(config, element):
     for c in _child_elements(element):
         _handle_conditions(config, c)
 
-def _parse_module_set(config, uri):
+def _parse_module_set(config, uri, parsed_module_sets=None):
+    if parsed_module_sets is None:
+        parsed_module_sets = {}
+    if uri in parsed_module_sets:
+        return parsed_module_sets[uri]
+
     try:
         filename = httpcache.load(uri, nonetwork=config.nonetwork, age=0)
     except Exception as e:
@@ -469,7 +474,7 @@ def _parse_module_set(config, uri):
     for node in _child_elements_matching(document.documentElement, ['redirect']):
         new_url = node.getAttribute('href')
         logging.info('moduleset is now located at %s', new_url)
-        return _parse_module_set(config, new_url)
+        return _parse_module_set(config, new_url, parsed_module_sets=parsed_module_sets)
 
     _handle_conditions(config, document.documentElement)
 
@@ -536,7 +541,7 @@ def _parse_module_set(config, uri):
             href = node.getAttribute('href')
             inc_uri = urlparse.urljoin(uri, href)
             try:
-                inc_moduleset = _parse_module_set(config, inc_uri)
+                inc_moduleset = _parse_module_set(config, inc_uri, parsed_module_sets=parsed_module_sets)
             except UndefinedRepositoryError:
                 raise
             except FatalError as e:
@@ -545,7 +550,7 @@ def _parse_module_set(config, uri):
                 # look up in local modulesets
                 inc_uri = os.path.join(os.path.dirname(__file__), '..', 'modulesets',
                                    href)
-                inc_moduleset = _parse_module_set(config, inc_uri)
+                inc_moduleset = _parse_module_set(config, inc_uri, parsed_module_sets=parsed_module_sets)
 
             moduleset.modules.update(inc_moduleset.modules)
         elif node.nodeName in ['repository', 'cvsroot', 'svnroot',
@@ -564,6 +569,7 @@ def _parse_module_set(config, uri):
     if default_repo:
         _default_repo = repositories[default_repo]
 
+    parsed_module_sets[uri] = moduleset
     return moduleset
 
 def warn_local_modulesets(config):
